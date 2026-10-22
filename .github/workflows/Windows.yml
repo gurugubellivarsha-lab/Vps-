@@ -1,3 +1,4 @@
+
 name: Windows RDP + Tailscale + Minecraft
 
 on:
@@ -8,44 +9,37 @@ permissions:
 
 jobs:
   rdp:
-    # Windows 11 ARM runner is available as a preview.
-    runs-on: windows-11-arm
+    runs-on: windows-2025
     timeout-minutes: 350
 
     steps:
-      - name: Enable RDP and Create User
+      - name: Configure RDP
         shell: pwsh
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-            throw "Add RDP_PASSWORD in GitHub Secrets."
-          }
+          $bytes = New-Object byte[] 24
+          [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $password = [Convert]::ToBase64String($bytes) + "aA1!"
 
-          $password = ConvertTo-SecureString `
-            $env:RDP_PASSWORD -AsPlainText -Force
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
 
-          if (-not (Get-LocalUser -Name "rdpuser" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "rdpuser" `
-              -Password $password `
-              -PasswordNeverExpires
+          if (Get-LocalUser -Name "rdpuser" -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name "rdpuser" -Password $secure
           } else {
-            Set-LocalUser -Name "rdpuser" -Password $password
+            New-LocalUser -Name "rdpuser" -Password $secure
           }
 
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member "rdpuser" `
-            -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdpuser" -ErrorAction SilentlyContinue
 
           Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
             -Name fDenyTSConnections -Value 0
 
-          Set-Service -Name TermService -StartupType Automatic
-          Start-Service -Name TermService
-
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-Service TermService -StartupType Automatic
+          Start-Service TermService
+
+          "RDP_PASSWORD=$password" | Out-File $env:GITHUB_ENV -Append
+          "RDP_USERNAME=rdpuser" | Out-File $env:GITHUB_ENV -Append
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
@@ -56,44 +50,48 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '25'
+          java-version: '21'
 
-      - name: Prepare Minecraft Server
+      - name: Download Minecraft Paper
         shell: pwsh
         run: |
           $dir = "C:\minecraft"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          Set-Location $dir
 
-          $project = Invoke-RestMethod `
-            "https://api.papermc.io/v2/projects/paper"
-
+          $project = Invoke-RestMethod "https://api.papermc.io/v2/projects/paper"
           $version = $project.versions[-1]
 
-          $buildInfo = Invoke-RestMethod `
-            "https://api.papermc.io/v2/projects/paper/versions/$version"
-
-          $build = $buildInfo.builds[-1]
+          $info = Invoke-RestMethod "https://api.papermc.io/v2/projects/paper/versions/$version"
+          $build = $info.builds[-1]
 
           $url = "https://api.papermc.io/v2/projects/paper/versions/$version/builds/$build/downloads/paper-$version-$build.jar"
 
-          Invoke-WebRequest -Uri $url -OutFile "server.jar"
+          Invoke-WebRequest $url -OutFile "$dir\server.jar"
+          Set-Content "$dir\eula.txt" "eula=true"
 
-          "eula=true" | Set-Content "eula.txt"
+          New-NetFirewallRule `
+            -DisplayName "Minecraft Private Server" `
+            -Direction Inbound -Protocol TCP `
+            -LocalPort 25565 -Action Allow `
+            -Profile Private -ErrorAction SilentlyContinue
 
-          Start-Process -FilePath "java" `
+          Start-Process java `
             -ArgumentList "-Xms1G -Xmx3G -jar server.jar --nogui" `
             -WorkingDirectory $dir
 
-      - name: Show Private Connection Details
+      - name: Show Connection Details
         shell: pwsh
         run: |
           $ip = tailscale ip -4
-          Write-Host "Tailscale IP: $ip"
-          Write-Host "RDP address: ${ip}:3389"
-          Write-Host "RDP username: rdpuser"
-          Write-Host "Minecraft server port: 25565"
-          Write-Host "Keep the workflow running."
+
+          Write-Host "================================"
+          Write-Host "RDP IP: $ip"
+          Write-Host "RDP PORT: 3389"
+          Write-Host "USERNAME: $env:RDP_USERNAME"
+          Write-Host "PASSWORD: $env:RDP_PASSWORD"
+          Write-Host "MINECRAFT SERVER: ${ip}:25565"
+          Write-Host "================================"
+
           while ($true) {
             Start-Sleep -Seconds 30
           }
