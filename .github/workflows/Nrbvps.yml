@@ -29,27 +29,28 @@ jobs:
         shell: bash
         run: |
           set -e
-          USERNAME="vpsuser"
-          PASSWORD="$(openssl rand -hex 16)"
+
+          USERNAME="NRB"
+          PASSWORD="ROOT"
 
           docker exec ubuntu-vps bash -c '
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y sudo
-            useradd -m -s /bin/bash vpsuser
+            useradd -m -s /bin/bash NRB
           '
 
           printf '%s:%s\n' "$USERNAME" "$PASSWORD" |
             docker exec -i ubuntu-vps chpasswd
 
-          echo "::add-mask::$PASSWORD"
-          echo "Username: $USERNAME"
-          echo "Password: $PASSWORD"
+          echo "Username: NRB"
+          echo "Password: ROOT"
 
       - name: Show IPv4
         run: |
           echo "Public runner IPv4:"
           curl -4 -fsS https://api.ipify.org || true
           echo
+
           echo "Container IPv4:"
           docker inspect -f \
             '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
@@ -57,7 +58,7 @@ jobs:
 
       - name: Verify Ubuntu
         run: |
-          docker exec ubuntu-vps id vpsuser
+          docker exec ubuntu-vps id NRB
           docker exec ubuntu-vps cat /etc/os-release
           docker ps
           
