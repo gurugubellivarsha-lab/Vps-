@@ -1,5 +1,5 @@
 
-name: Ubuntu Docker VPS
+name: Create Real Ubuntu VPS
 
 on:
   workflow_dispatch:
@@ -8,57 +8,45 @@ permissions:
   contents: read
 
 jobs:
-  ubuntu:
+  create-vps:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Check Docker
+      - name: Create Ubuntu VPS
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
         run: |
-          docker --version
-          docker info
+          set -euo pipefail
 
-      - name: Create Ubuntu container
-        run: |
-          docker pull ubuntu:24.04
-          docker run -d \
-            --name ubuntu-vps \
-            --hostname ubuntu-vps \
-            ubuntu:24.04 sleep infinity
+          if [ -z "$DO_TOKEN" ] || [ -z "$SSH_KEY_ID" ]; then
+            echo "Configure DO_TOKEN and DO_SSH_KEY_ID in GitHub Secrets."
+            exit 1
+          fi
 
-      - name: Create user and password
-        shell: bash
-        run: |
-          set -e
+          RESPONSE=$(curl -fsS -X POST \
+            "https://api.digitalocean.com/v2/droplets" \
+            -H "Authorization: Bearer $DO_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"nrb-ubuntu-vps\",
+              \"region\": \"blr1\",
+              \"size\": \"s-1vcpu-1gb\",
+              \"image\": \"ubuntu-24-04-x64\",
+              \"ssh_keys\": [\"$SSH_KEY_ID\"],
+              \"ipv6\": true,
+              \"monitoring\": true
+            }")
 
-          USERNAME="NRB"
-          PASSWORD="ROOT"
+          echo "$RESPONSE" | jq .
 
-          docker exec ubuntu-vps bash -c '
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y sudo
-            useradd -m -s /bin/bash NRB
-          '
+          DROPLET_ID=$(echo "$RESPONSE" | jq -r '.droplet.id // empty')
 
-          printf '%s:%s\n' "$USERNAME" "$PASSWORD" |
-            docker exec -i ubuntu-vps chpasswd
+          if [ -z "$DROPLET_ID" ]; then
+            echo "VPS creation failed."
+            exit 1
+          fi
 
-          echo "Username: NRB"
-          echo "Password: ROOT"
-
-      - name: Show IPv4
-        run: |
-          echo "Public runner IPv4:"
-          curl -4 -fsS https://api.ipify.org || true
-          echo
-
-          echo "Container IPv4:"
-          docker inspect -f \
-            '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-            ubuntu-vps
-
-      - name: Verify Ubuntu
-        run: |
-          docker exec ubuntu-vps id NRB
-          docker exec ubuntu-vps cat /etc/os-release
-          docker ps
+          echo "VPS created. ID: $DROPLET_ID"
+          echo "Check the DigitalOcean dashboard for its public IPv4 address."
           
