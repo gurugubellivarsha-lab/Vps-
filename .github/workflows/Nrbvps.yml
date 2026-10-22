@@ -1,0 +1,62 @@
+
+name: Ubuntu Docker VPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-vps:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install Docker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io curl
+          sudo systemctl start docker
+
+      - name: Create Ubuntu container
+        run: |
+          sudo docker pull ubuntu:24.04
+          sudo docker run -dit \
+            --name ubuntu-vps \
+            --hostname ubuntu-vps \
+            ubuntu:24.04 bash
+
+      - name: Create user and password
+        shell: bash
+        run: |
+          USERNAME="vpsuser"
+          PASSWORD="$(openssl rand -hex 16)"
+
+          sudo docker exec ubuntu-vps bash -c '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y sudo openssh-server
+            useradd -m -s /bin/bash vpsuser
+          '
+
+          echo "$USERNAME:$PASSWORD" |
+            sudo docker exec -i ubuntu-vps chpasswd
+
+          echo "::add-mask::$PASSWORD"
+          echo "VPS_USERNAME=$USERNAME" >> "$GITHUB_ENV"
+          echo "VPS_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+
+          echo "Username: $USERNAME"
+          echo "Password saved as a masked workflow variable."
+
+      - name: Show public IPv4
+        run: |
+          echo "Runner public IPv4:"
+          curl -4 -fsS https://api.ipify.org || true
+          echo
+
+      - name: Show container information
+        run: |
+          sudo docker ps
+          sudo docker exec ubuntu-vps bash -c \
+            'cat /etc/os-release; echo "Container user: vpsuser"'
+            
