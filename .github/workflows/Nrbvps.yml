@@ -1,3 +1,4 @@
+
 name: Ubuntu Docker VPS
 
 on:
@@ -11,54 +12,52 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Install Docker
+      - name: Check Docker
         run: |
-          sudo apt-get update
-          sudo apt-get install -y docker.io curl
-          sudo systemctl start docker
-          sudo docker version
+          docker --version
+          docker info
 
       - name: Create Ubuntu container
         run: |
-          sudo docker run -d \
+          docker pull ubuntu:24.04
+          docker run -d \
             --name ubuntu-vps \
-            ubuntu:24.04 \
-            sleep infinity
+            --hostname ubuntu-vps \
+            ubuntu:24.04 sleep infinity
 
       - name: Create user and password
         shell: bash
         run: |
           set -e
-
           USERNAME="vpsuser"
           PASSWORD="$(openssl rand -hex 16)"
 
-          sudo docker exec ubuntu-vps bash -c '
+          docker exec ubuntu-vps bash -c '
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y sudo
             useradd -m -s /bin/bash vpsuser
           '
 
           printf '%s:%s\n' "$USERNAME" "$PASSWORD" |
-            sudo docker exec -i ubuntu-vps chpasswd
+            docker exec -i ubuntu-vps chpasswd
 
           echo "::add-mask::$PASSWORD"
           echo "Username: $USERNAME"
           echo "Password: $PASSWORD"
 
-      - name: Display IPv4
+      - name: Show IPv4
         run: |
-          echo "Runner public IPv4:"
+          echo "Public runner IPv4:"
           curl -4 -fsS https://api.ipify.org || true
           echo
           echo "Container IPv4:"
-          sudo docker inspect \
-            -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+          docker inspect -f \
+            '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
             ubuntu-vps
 
-      - name: Verify container
+      - name: Verify Ubuntu
         run: |
-          sudo docker ps
-          sudo docker exec ubuntu-vps id vpsuser
-          sudo docker exec ubuntu-vps cat /etc/os-release
+          docker exec ubuntu-vps id vpsuser
+          docker exec ubuntu-vps cat /etc/os-release
+          docker ps
           
