@@ -1,5 +1,5 @@
 
-name: Create Ubuntu VPS
+name: Ubuntu Browser Terminal with Tailscale
 
 on:
   workflow_dispatch:
@@ -8,160 +8,37 @@ permissions:
   contents: read
 
 jobs:
-  create-vps:
+  ubuntu:
     runs-on: ubuntu-24.04
-
     steps:
-      - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y curl jq
+      - name: Connect GitHub runner to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Check API credentials
-        env:
-          DO_TOKEN: ${{ secrets.DO_TOKEN }}
-          SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+      - name: Show Tailscale connection
         run: |
-          set -euo pipefail
+          tailscale status
+          tailscale ip -4
 
-          if [ -z "${DO_TOKEN:-}" ]; then
-            echo "::error::Missing DO_TOKEN. Add it under Settings > Secrets and variables > Actions."
-            exit 1
-          fi
-
-          if [ -z "${SSH_KEY_ID:-}" ]; then
-            echo "::error::Missing DO_SSH_KEY_ID. Add your DigitalOcean SSH key ID as a repository secret."
-            exit 1
-          fi
-
-          echo "Required secrets are present."
-
-      - name: Validate API token
-        env:
-          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+      - name: Create Ubuntu container
         run: |
-          set -euo pipefail
+          docker run -d \
+            --name ubuntu-vps \
+            ubuntu:24.04 sleep infinity
 
-          CODE=$(curl -sS -o response.json -w '%{http_code}' \
-            -H "Authorization: Bearer $DO_TOKEN" \
-            https://api.digitalocean.com/v2/account)
+          docker exec ubuntu-vps bash -c '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              bash sudo curl ca-certificates
+            useradd -m -s /bin/bash NRB
+            usermod -aG sudo NRB
+          '
 
-          if [ "$CODE" != "200" ]; then
-            echo "::error::DigitalOcean token rejected (HTTP $CODE). Check token validity and permissions."
-            cat response.json
-            exit 1
-          fi
-
-          echo "Token validated."
-
-      - name: Find six-vCPU plan
-        env:
-          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+      - name: Keep workflow alive
         run: |
-          set -euo pipefail
-
-          curl -fsS \
-            -H "Authorization: Bearer $DO_TOKEN" \
-            "https://api.digitalocean.com/v2/sizes?per_page=200" \
-            -o sizes.json
-
-          SIZE=$(jq -r '
-            [.sizes[]
-              | select(.available == true and .vcpus == 6)
-            ][0].slug // empty
-          ' sizes.json)
-
-          if [ -z "$SIZE" ]; then
-            echo "::error::No available six-vCPU plan was found."
-            jq -r '.sizes[] | select(.available == true) |
-              "\(.slug): \(.vcpus) vCPUs"' sizes.json | head -30
-            exit 1
-          fi
-
-          echo "SIZE=$SIZE" >> "$GITHUB_ENV"
-          echo "Selected plan: $SIZE"
-
-      - name: Validate SSH key
-        env:
-          DO_TOKEN: ${{ secrets.DO_TOKEN }}
-          SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
-        run: |
-          set -euo pipefail
-
-          curl -fsS \
-            -H "Authorization: Bearer $DO_TOKEN" \
-            https://api.digitalocean.com/v2/account/keys \
-            -o keys.json
-
-          jq -e --arg id "$SSH_KEY_ID" \
-            '.ssh_keys[] | select((.id | tostring) == $id)' \
-            keys.json >/dev/null || {
-              echo "::error::SSH key ID not found in this account."
-              exit 1
-            }
-
-      - name: Create Ubuntu VPS
-        env:
-          DO_TOKEN: ${{ secrets.DO_TOKEN }}
-          SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
-          SIZE: ${{ env.SIZE }}
-        run: |
-          set -euo pipefail
-
-          jq -n \
-            --arg size "$SIZE" \
-            --arg key "$SSH_KEY_ID" \
-            '{
-              name: "nrb-ubuntu-vps",
-              region: "blr1",
-              size: $size,
-              image: "ubuntu-24-04-x64",
-              ssh_keys: [$key],
-              ipv6: true,
-              monitoring: true
-            }' > payload.json
-
-          CODE=$(curl -sS -o result.json -w '%{http_code}' \
-            -X POST https://api.digitalocean.com/v2/droplets \
-            -H "Authorization: Bearer $DO_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data @payload.json)
-
-          if [ "$CODE" != "202" ]; then
-            echo "::error::VPS creation failed (HTTP $CODE)."
-            cat result.json
-            exit 1
-          fi
-
-          ID=$(jq -r '.droplet.id' result.json)
-          echo "VPS_ID=$ID" >> "$GITHUB_ENV"
-          echo "Created VPS ID: $ID"
-
-      - name: Retrieve public IPv4
-        env:
-          DO_TOKEN: ${{ secrets.DO_TOKEN }}
-          VPS_ID: ${{ env.VPS_ID }}
-        run: |
-          set -euo pipefail
-
-          for i in $(seq 1 30); do
-            curl -fsS \
-              -H "Authorization: Bearer $DO_TOKEN" \
-              "https://api.digitalocean.com/v2/droplets/$VPS_ID" \
-              -o droplet.json || continue
-
-            IP=$(jq -r '
-              .droplet.networks.v4[]?
-              | select(.type == "public")
-              | .ip_address
-            ' droplet.json | head -1)
-
-            if [ -n "$IP" ]; then
-              echo "Public IPv4: $IP"
-              exit 0
-            fi
-
-            sleep 10
-          done
-
-          echo "::error::VPS created but public IPv4 is not ready yet."
-          exit 1
+          echo "Ubuntu container is running."
+          echo "Tailscale is connected to the GitHub runner."
+          echo "This temporary environment stops when the job ends."
+          sleep 21600
           
