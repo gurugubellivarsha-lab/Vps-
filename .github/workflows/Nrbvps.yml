@@ -1,3 +1,4 @@
+
 name: Create Ubuntu VPS
 
 on:
@@ -14,29 +15,44 @@ jobs:
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y curl jq
 
+      - name: Check API credentials
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DO_TOKEN:-}" ]; then
+            echo "::error::Missing DO_TOKEN. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          if [ -z "${SSH_KEY_ID:-}" ]; then
+            echo "::error::Missing DO_SSH_KEY_ID. Add your DigitalOcean SSH key ID as a repository secret."
+            exit 1
+          fi
+
+          echo "Required secrets are present."
+
       - name: Validate API token
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$DO_TOKEN" || {
-            echo "::error::Add DO_TOKEN in GitHub Secrets"
-            exit 1
-          }
 
           CODE=$(curl -sS -o response.json -w '%{http_code}' \
             -H "Authorization: Bearer $DO_TOKEN" \
             https://api.digitalocean.com/v2/account)
 
           if [ "$CODE" != "200" ]; then
-            echo "::error::Token invalid or missing account permissions (HTTP $CODE)"
+            echo "::error::DigitalOcean token rejected (HTTP $CODE). Check token validity and permissions."
             cat response.json
             exit 1
           fi
 
-          echo "API token verified."
+          echo "Token validated."
 
-      - name: Find six-CPU plan
+      - name: Find six-vCPU plan
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
         run: |
@@ -49,34 +65,26 @@ jobs:
 
           SIZE=$(jq -r '
             [.sizes[]
-              | select(.available == true)
-              | select(.vcpus == 6)
-              | select(.slug | startswith("s-") or startswith("c-"))
+              | select(.available == true and .vcpus == 6)
             ][0].slug // empty
           ' sizes.json)
 
           if [ -z "$SIZE" ]; then
-            echo "::error::No available six-vCPU plan found. Check your provider's available sizes."
+            echo "::error::No available six-vCPU plan was found."
             jq -r '.sizes[] | select(.available == true) |
-              "\(.slug) \(.vcpus) vCPU"' sizes.json | head -30
+              "\(.slug): \(.vcpus) vCPUs"' sizes.json | head -30
             exit 1
           fi
 
           echo "SIZE=$SIZE" >> "$GITHUB_ENV"
           echo "Selected plan: $SIZE"
 
-      - name: Create VPS
+      - name: Validate SSH key
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
           SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
-          SIZE: ${{ env.SIZE }}
         run: |
           set -euo pipefail
-
-          test -n "$SSH_KEY_ID" || {
-            echo "::error::Add DO_SSH_KEY_ID in GitHub Secrets"
-            exit 1
-          }
 
           curl -fsS \
             -H "Authorization: Bearer $DO_TOKEN" \
@@ -84,23 +92,28 @@ jobs:
             -o keys.json
 
           jq -e --arg id "$SSH_KEY_ID" \
-            '.ssh_keys[] | select((.id|tostring)==$id)' \
+            '.ssh_keys[] | select((.id | tostring) == $id)' \
             keys.json >/dev/null || {
-              echo "::error::SSH key ID not found in this account"
+              echo "::error::SSH key ID not found in this account."
               exit 1
             }
 
+      - name: Create Ubuntu VPS
+        env:
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          SSH_KEY_ID: ${{ secrets.DO_SSH_KEY_ID }}
+          SIZE: ${{ env.SIZE }}
+        run: |
+          set -euo pipefail
+
           jq -n \
-            --arg name "nrb-ubuntu-vps" \
-            --arg region "blr1" \
             --arg size "$SIZE" \
-            --arg image "ubuntu-24-04-x64" \
             --arg key "$SSH_KEY_ID" \
             '{
-              name: $name,
-              region: $region,
+              name: "nrb-ubuntu-vps",
+              region: "blr1",
               size: $size,
-              image: $image,
+              image: "ubuntu-24-04-x64",
               ssh_keys: [$key],
               ipv6: true,
               monitoring: true
@@ -113,16 +126,16 @@ jobs:
             --data @payload.json)
 
           if [ "$CODE" != "202" ]; then
-            echo "::error::Creation failed (HTTP $CODE)"
+            echo "::error::VPS creation failed (HTTP $CODE)."
             cat result.json
             exit 1
           fi
 
           ID=$(jq -r '.droplet.id' result.json)
           echo "VPS_ID=$ID" >> "$GITHUB_ENV"
-          echo "VPS created: $ID"
+          echo "Created VPS ID: $ID"
 
-      - name: Get public IPv4
+      - name: Retrieve public IPv4
         env:
           DO_TOKEN: ${{ secrets.DO_TOKEN }}
           VPS_ID: ${{ env.VPS_ID }}
@@ -133,15 +146,15 @@ jobs:
             curl -fsS \
               -H "Authorization: Bearer $DO_TOKEN" \
               "https://api.digitalocean.com/v2/droplets/$VPS_ID" \
-              -o droplet.json || true
+              -o droplet.json || continue
 
             IP=$(jq -r '
               .droplet.networks.v4[]?
               | select(.type == "public")
               | .ip_address
-            ' droplet.json 2>/dev/null | head -1)
+            ' droplet.json | head -1)
 
-            if [ -n "${IP:-}" ]; then
+            if [ -n "$IP" ]; then
               echo "Public IPv4: $IP"
               exit 0
             fi
@@ -149,6 +162,6 @@ jobs:
             sleep 10
           done
 
-          echo "::error::VPS created, but IPv4 is not ready. Check the DigitalOcean dashboard."
+          echo "::error::VPS created but public IPv4 is not ready yet."
           exit 1
           
