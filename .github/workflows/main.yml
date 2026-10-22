@@ -1,0 +1,27 @@
+
+name: Ubuntu VPS with SSHX
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-vps:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Update Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
+
+      - name: Install SSHX
+        run: |
+          curl -sSf https://sshx.io/get | sh
+
+      - name: Start SSHX
+        run: |
+          sshx
+          
