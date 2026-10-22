@@ -1,4 +1,3 @@
-
 name: Ubuntu Docker VPS
 
 on:
@@ -8,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  ubuntu-vps:
+  ubuntu:
     runs-on: ubuntu-24.04
 
     steps:
@@ -17,46 +16,49 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y docker.io curl
           sudo systemctl start docker
+          sudo docker version
 
       - name: Create Ubuntu container
         run: |
-          sudo docker pull ubuntu:24.04
-          sudo docker run -dit \
+          sudo docker run -d \
             --name ubuntu-vps \
-            --hostname ubuntu-vps \
-            ubuntu:24.04 bash
+            ubuntu:24.04 \
+            sleep infinity
 
       - name: Create user and password
         shell: bash
         run: |
+          set -e
+
           USERNAME="vpsuser"
           PASSWORD="$(openssl rand -hex 16)"
 
           sudo docker exec ubuntu-vps bash -c '
             apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y sudo openssh-server
+            DEBIAN_FRONTEND=noninteractive apt-get install -y sudo
             useradd -m -s /bin/bash vpsuser
           '
 
-          echo "$USERNAME:$PASSWORD" |
+          printf '%s:%s\n' "$USERNAME" "$PASSWORD" |
             sudo docker exec -i ubuntu-vps chpasswd
 
           echo "::add-mask::$PASSWORD"
-          echo "VPS_USERNAME=$USERNAME" >> "$GITHUB_ENV"
-          echo "VPS_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
-
           echo "Username: $USERNAME"
-          echo "Password saved as a masked workflow variable."
+          echo "Password: $PASSWORD"
 
-      - name: Show public IPv4
+      - name: Display IPv4
         run: |
           echo "Runner public IPv4:"
           curl -4 -fsS https://api.ipify.org || true
           echo
+          echo "Container IPv4:"
+          sudo docker inspect \
+            -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+            ubuntu-vps
 
-      - name: Show container information
+      - name: Verify container
         run: |
           sudo docker ps
-          sudo docker exec ubuntu-vps bash -c \
-            'cat /etc/os-release; echo "Container user: vpsuser"'
-            
+          sudo docker exec ubuntu-vps id vpsuser
+          sudo docker exec ubuntu-vps cat /etc/os-release
+          
