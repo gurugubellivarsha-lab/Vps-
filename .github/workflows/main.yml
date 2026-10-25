@@ -44,22 +44,37 @@ jobs:
 
           choco install temurin21 vscode -y --no-progress
 
-          Write-Host "Java version:"
+          Write-Host "Checking Java..."
           java -version
 
-          Write-Host "VS Code:"
-          code --version
+          Write-Host "Checking VS Code..."
+
+          $codePaths = @(
+            "$env:ProgramFiles\Microsoft VS Code\Code.exe",
+            "${env:ProgramFiles(x86)}\Microsoft VS Code\Code.exe",
+            "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
+          )
+
+          $codeExe = $codePaths |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (-not $codeExe) {
+            throw "VS Code installation not found."
+          }
+
+          & $codeExe --version
+          Write-Host "Java and VS Code are ready."
 
       - name: Check graphics and OpenGL
         shell: pwsh
         run: |
           Write-Host "Available graphics adapters:"
           Get-CimInstance Win32_VideoController |
-            Select-Object Name, DriverVersion,
-              VideoProcessor |
+            Select-Object Name, DriverVersion, VideoProcessor |
             Format-List
 
-          Write-Host "OpenGL support depends on the graphics driver."
+          Write-Host "OpenGL depends on the available graphics driver."
           Write-Host "Hardware acceleration is not guaranteed."
 
       - name: Configure RDP
@@ -102,12 +117,12 @@ jobs:
       - name: Show connection details
         shell: pwsh
         run: |
-          Write-Host "Tailscale IPv4:"
+          Write-Host "Tailscale IP:"
           tailscale ip -4
           Write-Host "RDP username: NRB"
-          Write-Host "Fast Client website: https://fastclient.net/"
+          Write-Host "Fast Client: https://fastclient.net/"
 
-      - name: Prepare restored workspace
+      - name: Prepare workspace
         shell: pwsh
         run: |
           $folder = "$env:GITHUB_WORKSPACE\RDP-Workspace"
@@ -118,8 +133,7 @@ jobs:
           $readme = Join-Path $folder "README.txt"
 
           if (!(Test-Path $readme)) {
-            "Workspace for saved files." |
-              Set-Content $readme
+            "Workspace for saved files." | Set-Content $readme
           }
 
           Get-ChildItem $folder -Recurse
@@ -127,10 +141,8 @@ jobs:
       - name: Open Fast Client website
         shell: pwsh
         run: |
-          Write-Host "Official Fast Client download page:"
-          Write-Host "https://fastclient.net/"
-
           Start-Process "https://fastclient.net/"
+          Write-Host "Official Fast Client download page opened."
 
       - name: Keep session available
         shell: pwsh
