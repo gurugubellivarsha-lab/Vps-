@@ -1,27 +1,154 @@
 
-name: Ubuntu VPS with SSHX
+name: Windows RDP with Tailscale
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  ubuntu-vps:
-    runs-on: ubuntu-24.04
+  rdp:
+    runs-on: windows-2025
+    timeout-minutes: 350
 
     steps:
-      - name: Update Ubuntu
+      - name: Validate secrets
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Add the RDP_PASSWORD secret."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+            throw "Add the TS_AUTHKEY secret."
+          }
 
-      - name: Install SSHX
-        run: |
-          curl -sSf https://sshx.io/get | sh
+      - name: Restore previous workspace backup
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: RDP-Workspace
+          path: RDP-Workspace/
+          repository: ${{ github.repository }}
+          run-id: 40148480212
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Start SSHX
+      - name: Install Java 21 and VS Code
+        shell: pwsh
         run: |
-          sshx
+          $ErrorActionPreference = "Stop"
+
+          choco install temurin21 vscode -y --no-progress
+
+          Write-Host "Java version:"
+          java -version
+
+          Write-Host "VS Code:"
+          code --version
+
+      - name: Check graphics and OpenGL
+        shell: pwsh
+        run: |
+          Write-Host "Available graphics adapters:"
+          Get-CimInstance Win32_VideoController |
+            Select-Object Name, DriverVersion,
+              VideoProcessor |
+            Format-List
+
+          Write-Host "OpenGL support depends on the graphics driver."
+          Write-Host "Hardware acceleration is not guaranteed."
+
+      - name: Configure RDP
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $password = ConvertTo-SecureString `
+            $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (Get-LocalUser -Name "NRB" `
+              -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name "NRB" -Password $password
+          } else {
+            New-LocalUser -Name "NRB" `
+              -Password $password `
+              -PasswordNeverExpires | Out-Null
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "NRB" `
+            -ErrorAction SilentlyContinue
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name fDenyTSConnections -Value 0
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop"
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          timeout: 3m
+
+      - name: Show connection details
+        shell: pwsh
+        run: |
+          Write-Host "Tailscale IPv4:"
+          tailscale ip -4
+          Write-Host "RDP username: NRB"
+          Write-Host "Fast Client website: https://fastclient.net/"
+
+      - name: Prepare restored workspace
+        shell: pwsh
+        run: |
+          $folder = "$env:GITHUB_WORKSPACE\RDP-Workspace"
+
+          New-Item -ItemType Directory `
+            -Path $folder -Force | Out-Null
+
+          $readme = Join-Path $folder "README.txt"
+
+          if (!(Test-Path $readme)) {
+            "Workspace for saved files." |
+              Set-Content $readme
+          }
+
+          Get-ChildItem $folder -Recurse
+
+      - name: Open Fast Client website
+        shell: pwsh
+        run: |
+          Write-Host "Official Fast Client download page:"
+          Write-Host "https://fastclient.net/"
+
+          Start-Process "https://fastclient.net/"
+
+      - name: Keep session available
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 330; $i++) {
+            Start-Sleep -Seconds 60
+
+            if ($i % 5 -eq 0) {
+              Write-Host "Session running: $i minutes"
+            }
+          }
+
+      - name: Save workspace backup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDP-Workspace
+          path: RDP-Workspace/
+          if-no-files-found: warn
+          retention-days: 7
           
