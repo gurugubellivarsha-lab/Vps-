@@ -27,55 +27,50 @@ jobs:
             throw "Add the TS_AUTHKEY secret."
           }
 
-      - name: Restore previous workspace backup
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: RDP-Workspace
-          path: RDP-Workspace/
-          repository: ${{ github.repository }}
-          run-id: 40148480212
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Java 21 and VS Code
+      - name: Restore latest workspace backup
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           $ErrorActionPreference = "Stop"
+          $folder = "$env:GITHUB_WORKSPACE\RDP-Workspace"
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
 
-          choco install temurin21 vscode -y --no-progress
+          $runs = gh run list `
+            --repo $env:REPOSITORY `
+            --limit 50 `
+            --status completed `
+            --json databaseId,conclusion,createdAt |
+            ConvertFrom-Json |
+            Where-Object {
+              $_.databaseId -ne [long]$env:GITHUB_RUN_ID -and
+              $_.conclusion -eq "success"
+            } |
+            Sort-Object createdAt -Descending
 
-          Write-Host "Checking Java..."
-          java -version
+          $restored = $false
 
-          Write-Host "Checking VS Code..."
+          foreach ($run in $runs) {
+            Write-Host "Checking run $($run.databaseId)"
 
-          $codePaths = @(
-            "$env:ProgramFiles\Microsoft VS Code\Code.exe",
-            "${env:ProgramFiles(x86)}\Microsoft VS Code\Code.exe",
-            "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
-          )
+            gh run download $run.databaseId `
+              --repo $env:REPOSITORY `
+              --name RDP-Workspace `
+              --dir $folder
 
-          $codeExe = $codePaths |
-            Where-Object { Test-Path $_ } |
-            Select-Object -First 1
-
-          if (-not $codeExe) {
-            throw "VS Code installation not found."
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Workspace restored successfully."
+              $restored = $true
+              break
+            }
           }
 
-          & $codeExe --version
-          Write-Host "Java and VS Code are ready."
+          if (-not $restored) {
+            Write-Warning "No previous workspace artifact found."
+          }
 
-      - name: Check graphics and OpenGL
-        shell: pwsh
-        run: |
-          Write-Host "Available graphics adapters:"
-          Get-CimInstance Win32_VideoController |
-            Select-Object Name, DriverVersion, VideoProcessor |
-            Format-List
-
-          Write-Host "OpenGL depends on the available graphics driver."
-          Write-Host "Hardware acceleration is not guaranteed."
+          Get-ChildItem $folder -Recurse -Force
 
       - name: Configure RDP
         shell: pwsh
@@ -83,7 +78,6 @@ jobs:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-
           $password = ConvertTo-SecureString `
             $env:RDP_PASSWORD -AsPlainText -Force
 
@@ -117,39 +111,27 @@ jobs:
       - name: Show connection details
         shell: pwsh
         run: |
-          Write-Host "Tailscale IP:"
+          Write-Host "Tailscale IPv4:"
           tailscale ip -4
           Write-Host "RDP username: NRB"
-          Write-Host "Fast Client: https://fastclient.net/"
 
       - name: Prepare workspace
         shell: pwsh
         run: |
           $folder = "$env:GITHUB_WORKSPACE\RDP-Workspace"
-
-          New-Item -ItemType Directory `
-            -Path $folder -Force | Out-Null
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
 
           $readme = Join-Path $folder "README.txt"
-
-          if (!(Test-Path $readme)) {
-            "Workspace for saved files." | Set-Content $readme
+          if (-not (Test-Path $readme)) {
+            "Save files here for artifact backup." |
+              Set-Content $readme
           }
-
-          Get-ChildItem $folder -Recurse
-
-      - name: Open Fast Client website
-        shell: pwsh
-        run: |
-          Start-Process "https://fastclient.net/"
-          Write-Host "Official Fast Client download page opened."
 
       - name: Keep session available
         shell: pwsh
         run: |
           for ($i = 1; $i -le 330; $i++) {
             Start-Sleep -Seconds 60
-
             if ($i % 5 -eq 0) {
               Write-Host "Session running: $i minutes"
             }
