@@ -1,77 +1,165 @@
-name: Windows RDP Backup and Restore
+name: Windows RDP Tailscale Backup Restore
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Choose backup or restore"
+        description: "Select mode"
         required: true
         type: choice
         options:
           - backup
           - restore
+          - rdp-only
 
 permissions:
   contents: write
 
 jobs:
-  rdp:
+  windows-rdp:
     runs-on: windows-latest
     timeout-minutes: 15
 
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow branch
         uses: actions/checkout@v4
         with:
-          ref: rdp-backups
+          ref: ${{ github.ref }}
+          fetch-depth: 0
           persist-credentials: true
 
-      - name: Prepare backup folder
+      - name: Install and connect Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Configure temporary RDP account
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          if (-not $env:RDP_PASSWORD) {
+            throw "Add the RDP_PASSWORD repository secret."
+          }
+
+          $password = ConvertTo-SecureString `
+            $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (Get-LocalUser -Name rdpuser -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name rdpuser -Password $password
+          } else {
+            New-LocalUser -Name rdpuser -Password $password
+          }
+
+          Add-LocalGroupMember -Group "Remote Desktop Users" `
+            -Member rdpuser -ErrorAction SilentlyContinue
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name fDenyTSConnections -Value 0
+
+          Set-Service TermService -StartupType Automatic
+          Start-Service TermService
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          $ip = tailscale ip -4 | Select-Object -First 1
+          if (-not $ip) {
+            throw "Tailscale IP not found."
+          }
+
+          "RDP_HOST=$ip" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "Tailscale IP: $ip"
+          Write-Host "RDP username: rdpuser"
+
+      - name: Prepare backup branch
+        if: inputs.mode == 'backup'
         shell: pwsh
         run: |
+          git fetch origin
+
+          $exists = git ls-remote --heads origin rdp-backups
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not check remote branches."
+          }
+
+          if ($exists) {
+            git checkout -B rdp-backups origin/rdp-backups
+          } else {
+            git checkout --orphan rdp-backups
+            git rm -rf . 2>$null
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           New-Item -ItemType Directory -Force -Path backup | Out-Null
 
-      - name: Restore saved backup
+      - name: Create user files backup
+        if: inputs.mode == 'backup'
+        shell: pwsh
+        run: |
+          $source = "$env:USERPROFILE\Documents"
+          New-Item -ItemType Directory -Force -Path $source | Out-Null
+
+          $archive = "backup/windows-user-files.zip"
+          Compress-Archive -Path "$source\*" `
+            -DestinationPath $archive -Force
+
+          if (-not (Test-Path $archive) -or
+              (Get-Item $archive).Length -eq 0) {
+            throw "Backup ZIP was not created correctly."
+          }
+
+      - name: Push backup to repository
+        if: inputs.mode == 'backup'
+        shell: pwsh
+        run: |
+          git add backup/
+          git commit -m "Save Windows user files backup"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Backup commit failed."
+          }
+
+          git push origin HEAD:refs/heads/rdp-backups
+
+      - name: Download backup branch
         if: inputs.mode == 'restore'
         shell: pwsh
         run: |
-          $file = Get-ChildItem backup -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -eq ".zip" } |
-            Select-Object -First 1
+          git fetch origin refs/heads/rdp-backups:refs/remotes/origin/rdp-backups
 
-          if (-not $file) {
-            throw "No ZIP backup exists on the rdp-backups branch."
+          if ($LASTEXITCODE -ne 0) {
+            throw "Backup branch missing. Run backup mode first."
           }
 
-          Expand-Archive -Path $file.FullName `
-            -DestinationPath "$env:RUNNER_TEMP\rdp-restore" -Force
+          $archive = "$env:RUNNER_TEMP\windows-user-files.zip"
 
-          Write-Host "Backup extracted successfully."
-          Write-Host "Files are in $env:RUNNER_TEMP\rdp-restore"
+          git show origin/rdp-backups:backup/windows-user-files.zip `
+            | Set-Content -Encoding Byte $archive
 
-      - name: Check backup before upload
-        if: inputs.mode == 'backup'
+          if (-not (Test-Path $archive) -or
+              (Get-Item $archive).Length -eq 0) {
+            throw "Backup ZIP missing or empty."
+          }
+
+          Expand-Archive -Path $archive `
+            -DestinationPath "$env:USERPROFILE\Documents" -Force
+
+          Write-Host "User files restored."
+
+      - name: Keep RDP runner available
+        if: inputs.mode == 'rdp-only'
         shell: pwsh
         run: |
-          $file = Get-ChildItem backup -Filter "*.zip" -File |
-            Select-Object -First 1
+          Write-Host "RDP host: $env:RDP_HOST"
+          Write-Host "Username: rdpuser"
+          Start-Sleep -Seconds 600
 
-          if (-not $file) {
-            throw "Put your existing RDP backup ZIP in the backup folder first."
-          }
-
-          if ($file.Length -eq 0) {
-            throw "Backup ZIP is empty."
-          }
-
-      - name: Save backup to repository
-        if: inputs.mode == 'backup'
+      - name: Show connection information
+        if: always()
         shell: pwsh
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backup/
-          git commit -m "Save RDP backup" || {
-            Write-Host "No changes to save."
-          }
-          git push origin HEAD:rdp-backups
+          Write-Host "RDP host: $env:RDP_HOST"
+          Write-Host "Username: rdpuser"
+          Write-Host "Maximum job duration: 15 minutes"
