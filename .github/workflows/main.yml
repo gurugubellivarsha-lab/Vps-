@@ -1,165 +1,163 @@
-name: Windows RDP Tailscale Backup Restore
+
+name: NRB RDP - Backup and Restore
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: "Select mode"
-        required: true
-        type: choice
-        options:
-          - backup
-          - restore
-          - rdp-only
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
+
+concurrency:
+  group: nrb-rdp-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  windows-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 15
+  rdp:
+    runs-on: windows-2025
+    timeout-minutes: 350
 
     steps:
-      - name: Checkout workflow branch
-        uses: actions/checkout@v4
+      - name: Checkout backup branch
+        uses: actions/checkout@v5
         with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
-          persist-credentials: true
+          ref: rdp-backups
+          persist-credentials: false
 
-      - name: Install and connect Tailscale
-        uses: tailscale/github-action@v3
+      - name: Validate secrets
+        shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Missing RDP_PASSWORD repository secret."
+          }
+
+          if ($env:RDP_PASSWORD.Length -lt 14) {
+            throw "RDP_PASSWORD must be at least 14 characters."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+            throw "Missing TS_AUTHKEY repository secret."
+          }
+
+      - name: Restore committed ZIP backup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $workspace = Join-Path $env:GITHUB_WORKSPACE "RDP-Workspace"
+          New-Item -ItemType Directory -Path $workspace -Force | Out-Null
+
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "backup\windows-user-files.zip"
+
+          if (Test-Path $zipPath) {
+            Expand-Archive -LiteralPath $zipPath `
+              -DestinationPath $workspace -Force
+            Write-Host "Committed ZIP backup restored."
+          } else {
+            Write-Host "No committed ZIP backup found."
+          }
+
+      - name: Restore previous workflow artifact
+        uses: dawidd6/action-download-artifact@v11
+        continue-on-error: true
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          workflow: rdp.yml
+          branch: rdp-backups
+          name: RDP-Workspace
+          path: RDP-Workspace
+          if_no_artifact_found: warn
 
-      - name: Configure temporary RDP account
+      - name: Configure RDP account
         shell: pwsh
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          if (-not $env:RDP_PASSWORD) {
-            throw "Add the RDP_PASSWORD repository secret."
-          }
+          $ErrorActionPreference = "Stop"
 
           $password = ConvertTo-SecureString `
             $env:RDP_PASSWORD -AsPlainText -Force
 
-          if (Get-LocalUser -Name rdpuser -ErrorAction SilentlyContinue) {
-            Set-LocalUser -Name rdpuser -Password $password
+          if (Get-LocalUser -Name "rdpuser" `
+              -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name "rdpuser" -Password $password
           } else {
-            New-LocalUser -Name rdpuser -Password $password
+            New-LocalUser -Name "rdpuser" `
+              -Password $password `
+              -Description "Temporary NRB RDP account" `
+              -PasswordNeverExpires | Out-Null
           }
 
-          Add-LocalGroupMember -Group "Remote Desktop Users" `
-            -Member rdpuser -ErrorAction SilentlyContinue
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "rdpuser" `
+            -ErrorAction SilentlyContinue
 
           Set-ItemProperty `
-            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
             -Name fDenyTSConnections -Value 0
 
-          Set-Service TermService -StartupType Automatic
-          Start-Service TermService
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          $ip = tailscale ip -4 | Select-Object -First 1
-          if (-not $ip) {
-            throw "Tailscale IP not found."
-          }
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          timeout: 3m
 
-          "RDP_HOST=$ip" | Out-File $env:GITHUB_ENV -Append
-          Write-Host "Tailscale IP: $ip"
+      - name: Show connection details
+        shell: pwsh
+        run: |
+          Write-Host "Tailscale IPv4:"
+          tailscale ip -4
           Write-Host "RDP username: rdpuser"
+          Write-Host "RDP port: 3389"
 
-      - name: Prepare backup branch
-        if: inputs.mode == 'backup'
+      - name: Install Minecraft Launcher
         shell: pwsh
+        continue-on-error: true
         run: |
-          git fetch origin
-
-          $exists = git ls-remote --heads origin rdp-backups
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not check remote branches."
-          }
-
-          if ($exists) {
-            git checkout -B rdp-backups origin/rdp-backups
+          if (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget install --id Mojang.MinecraftLauncher `
+              --exact --silent `
+              --accept-source-agreements `
+              --accept-package-agreements
           } else {
-            git checkout --orphan rdp-backups
-            git rm -rf . 2>$null
+            Write-Warning "winget unavailable; skipping installation."
           }
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          New-Item -ItemType Directory -Force -Path backup | Out-Null
-
-      - name: Create user files backup
-        if: inputs.mode == 'backup'
+      - name: Keep session available
         shell: pwsh
         run: |
-          $source = "$env:USERPROFILE\Documents"
-          New-Item -ItemType Directory -Force -Path $source | Out-Null
+          for ($i = 1; $i -le 340; $i++) {
+            Start-Sleep -Seconds 60
 
-          $archive = "backup/windows-user-files.zip"
-          Compress-Archive -Path "$source\*" `
-            -DestinationPath $archive -Force
-
-          if (-not (Test-Path $archive) -or
-              (Get-Item $archive).Length -eq 0) {
-            throw "Backup ZIP was not created correctly."
+            if ($i % 5 -eq 0) {
+              Write-Host "Session active: $i minutes."
+            }
           }
 
-      - name: Push backup to repository
-        if: inputs.mode == 'backup'
-        shell: pwsh
-        run: |
-          git add backup/
-          git commit -m "Save Windows user files backup"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Backup commit failed."
-          }
-
-          git push origin HEAD:refs/heads/rdp-backups
-
-      - name: Download backup branch
-        if: inputs.mode == 'restore'
-        shell: pwsh
-        run: |
-          git fetch origin refs/heads/rdp-backups:refs/remotes/origin/rdp-backups
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Backup branch missing. Run backup mode first."
-          }
-
-          $archive = "$env:RUNNER_TEMP\windows-user-files.zip"
-
-          git show origin/rdp-backups:backup/windows-user-files.zip `
-            | Set-Content -Encoding Byte $archive
-
-          if (-not (Test-Path $archive) -or
-              (Get-Item $archive).Length -eq 0) {
-            throw "Backup ZIP missing or empty."
-          }
-
-          Expand-Archive -Path $archive `
-            -DestinationPath "$env:USERPROFILE\Documents" -Force
-
-          Write-Host "User files restored."
-
-      - name: Keep RDP runner available
-        if: inputs.mode == 'rdp-only'
-        shell: pwsh
-        run: |
-          Write-Host "RDP host: $env:RDP_HOST"
-          Write-Host "Username: rdpuser"
-          Start-Sleep -Seconds 600
-
-      - name: Show connection information
+      - name: Prepare workspace backup
         if: always()
         shell: pwsh
         run: |
-          Write-Host "RDP host: $env:RDP_HOST"
-          Write-Host "Username: rdpuser"
-          Write-Host "Maximum job duration: 15 minutes"
+          $workspace = Join-Path $env:GITHUB_WORKSPACE "RDP-Workspace"
+          New-Item -ItemType Directory -Path $workspace -Force | Out-Null
+
+          "Backup time: $(Get-Date -Format o)" |
+            Set-Content (Join-Path $workspace "backup-info.txt") -Encoding UTF8
+
+      - name: Upload workspace backup
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: RDP-Workspace
+          path: RDP-Workspace/
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+          
