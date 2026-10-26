@@ -1,5 +1,5 @@
 
-name: Windows RDP with backup
+name: Windows RDP with Tailscale
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   rdp:
     runs-on: windows-2025
-    timeout-minutes: 350
+    timeout-minutes: 15
 
     steps:
       - name: Validate secrets
@@ -27,50 +27,25 @@ jobs:
             throw "Add the TS_AUTHKEY secret."
           }
 
-      - name: Restore latest workspace backup
+      - name: Prepare workspace
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
         run: |
-          $ErrorActionPreference = "Stop"
           $folder = "$env:GITHUB_WORKSPACE\RDP-Workspace"
           New-Item -ItemType Directory -Path $folder -Force | Out-Null
-
-          $runs = gh run list `
-            --repo $env:REPOSITORY `
-            --limit 50 `
-            --status completed `
-            --json databaseId,conclusion,createdAt |
-            ConvertFrom-Json |
-            Where-Object {
-              $_.databaseId -ne [long]$env:GITHUB_RUN_ID -and
-              $_.conclusion -eq "success"
-            } |
-            Sort-Object createdAt -Descending
-
-          $restored = $false
-
-          foreach ($run in $runs) {
-            Write-Host "Checking run $($run.databaseId)"
-
-            gh run download $run.databaseId `
-              --repo $env:REPOSITORY `
-              --name RDP-Workspace `
-              --dir $folder
-
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "Workspace restored successfully."
-              $restored = $true
-              break
-            }
+          $readme = Join-Path $folder "README.txt"
+          if (-not (Test-Path $readme)) {
+            "Workspace backup test file." | Set-Content $readme
           }
 
-          if (-not $restored) {
-            Write-Warning "No previous workspace artifact found."
-          }
-
-          Get-ChildItem $folder -Recurse -Force
+      - name: Restore workspace backup
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: RDP-Workspace
+          path: RDP-Workspace/
+          repository: ${{ github.repository }}
+          run-id: ${{ vars.RDP_BACKUP_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure RDP
         shell: pwsh
@@ -78,11 +53,9 @@ jobs:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          $password = ConvertTo-SecureString `
-            $env:RDP_PASSWORD -AsPlainText -Force
+          $password = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
 
-          if (Get-LocalUser -Name "NRB" `
-              -ErrorAction SilentlyContinue) {
+          if (Get-LocalUser -Name "NRB" -ErrorAction SilentlyContinue) {
             Set-LocalUser -Name "NRB" -Password $password
           } else {
             New-LocalUser -Name "NRB" `
@@ -99,8 +72,7 @@ jobs:
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
             -Name fDenyTSConnections -Value 0
 
-          Enable-NetFirewallRule `
-            -DisplayGroup "Remote Desktop"
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
@@ -115,26 +87,12 @@ jobs:
           tailscale ip -4
           Write-Host "RDP username: NRB"
 
-      - name: Prepare workspace
+      - name: Keep session available for testing
         shell: pwsh
         run: |
-          $folder = "$env:GITHUB_WORKSPACE\RDP-Workspace"
-          New-Item -ItemType Directory -Path $folder -Force | Out-Null
-
-          $readme = Join-Path $folder "README.txt"
-          if (-not (Test-Path $readme)) {
-            "Save files here for artifact backup." |
-              Set-Content $readme
-          }
-
-      - name: Keep session available
-        shell: pwsh
-        run: |
-          for ($i = 1; $i -le 330; $i++) {
+          for ($i = 1; $i -le 10; $i++) {
             Start-Sleep -Seconds 60
-            if ($i % 5 -eq 0) {
-              Write-Host "Session running: $i minutes"
-            }
+            Write-Host "Session running: $i minutes"
           }
 
       - name: Save workspace backup
